@@ -28,6 +28,7 @@ src/ ─── 模型层：GPT/SoVITS 推理、G2P、特征提取、说话人验
 ├── tts_engine.py        # 推理引擎（TTSEngine 类 + 文本处理 + 模型加载）
 ├── config.py            # 设备检测 + Config / GlobalConfig
 ├── lang_segment.py      # 多语言识别与分段
+├── model_downloader.py  # 启动时自动下载缺失模型
 ├── voices.yaml          # 模型路径 + 预设音色配置
 ├── requirements.txt     # Python 依赖
 ├── README.md
