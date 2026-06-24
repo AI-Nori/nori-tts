@@ -1,0 +1,47 @@
+# nori-tts 流式合成服务 - 依赖清单
+# 安装: pip install -r requirements.txt
+#
+# 注意: torch / torchaudio 需根据 CUDA 版本选择对应索引,
+#       以下默认为 CUDA 13.0 (GB10 sm_121).
+#       其他平台请参考 https://pytorch.org/get-started/locally/
+#
+# 推理引擎已内嵌于 src/ 目录，无需额外 pip install
+
+# ---- 服务框架 ----
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+
+# ---- 推理引擎依赖 ----
+torch>=2.0.0
+torchaudio>=2.0.0
+transformers>=4.0.0
+safetensors>=0.3.0
+einops>=0.6.0
+av>=10.0.0
+
+# ---- 音频处理 ----
+numpy
+scipy
+
+# ---- 文本处理（G2P 依赖）----
+pypinyin>=0.49.0
+jieba>=0.42.0
+sentencepiece>=0.1.96
+inflect
+nltk
+wordsegment
+py3langid>=0.3.0
+pyopenjtalk
+pysbd
+
+# ---- 进度条 ----
+tqdm
+requests
+
+# ---- 可选：Flash Attention（加速 GPT 推理）----
+# 无此包时自动回退到普通注意力机制
+# flash-attn>=2.0.0
+
+# ---- 配置 ----
+pyyaml>=6.0

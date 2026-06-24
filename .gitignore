@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+models/
+examples/
+*.wav
+*.mp3
+*.flac
+*.ckpt
+*.pth
+*.onnx
+server.log
+.env
+voices.yaml

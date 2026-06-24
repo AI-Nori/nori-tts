@@ -1,0 +1,40 @@
+# nori-tts 流式合成服务 - 配置范例
+#
+# 使用方法：复制此文件为 voices.yaml，根据实际环境修改
+#   cp voices.yaml.example voices.yaml
+#
+# ============================================================
+# 模型配置
+# ============================================================
+# models_dir:       预训练模型根目录（GPT/SoVITS/BERT 等权重文件的父目录）
+# gpt_model:        GPT 模型文件名（相对于 models_dir，默认 s1v3.ckpt）
+# sovits_model:     SoVITS 模型文件名（相对于 models_dir，默认 s2Gv2ProPlus.pth）
+# target_sample_rate: 输出重采样目标采样率（默认 24000）
+# model_id:         OpenAI 兼容的模型 ID，用于 /v1/models 端点和请求校验（默认 gsv）
+
+models_dir: ./models
+gpt_model: s1v3.ckpt
+sovits_model: s2Gv2ProPlus.pth
+target_sample_rate: 24000
+model_id: gsv
+
+# ============================================================
+# 预设音色配置
+# ============================================================
+# 每个音色条目包含：
+#   ref_audio_path:      音色参考音频文件路径（必填，决定说话人音色）
+#   ref_text:            参考音频对应的原文（必填，用于引导合成）
+#   emotion_audio_path:  情感参考音频路径（可选，控制语气/情感风格，默认与 ref_audio_path 相同）
+#
+# 使用方式：
+#   CustomVoice 模式 - 客户端在 session.config 中传 "voice": "音色名"
+#   声音克隆模式   - 客户端在 session.config 中传 "ref_audio" (base64) + "ref_text"
+
+voices:
+  # 示例音色（请替换为实际音频路径和文本）
+  # yaoyao:
+  #   ref_audio_path: ./examples/yaoyao2.wav
+  #   ref_text: "其他事情不用操心，瑶瑶都会准备好的！"
+  #   # emotion_audio_path: ./examples/yaoyao2.wav  # 可选，控制情感风格
+
+  # 添加更多音色请按上述格式继续...
