@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>nori-tts 语音合成</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="container">
+  <!-- 标题 -->
+  <div class="header">
+    <h1>
+      <span class="cat-ears">
+        <span style="position:relative;display:inline-block;">
+          <span class="cat-ear"></span>
+          <span class="cat-ear inner"></span>
+        </span>
+        <span style="position:relative;display:inline-block;">
+          <span class="cat-ear"></span>
+          <span class="cat-ear inner"></span>
+        </span>
+      </span>
+      nori-tts
+    </h1>
+    <p class="subtitle">暖暖的语音合成工坊 · 猫猫守护中</p>
+  </div>
+
+  <!-- 主内容两栏 -->
+  <div class="main-grid">
+
+    <!-- 左栏：预制音色合成 -->
+    <div class="card">
+      <div class="card-title"><span class="icon">🎤</span> 预制音色合成</div>
+
+      <div class="form-group">
+        <label>选择音色</label>
+        <div class="voice-select-wrapper">
+          <select id="voiceSelect">
+            <option value="">加载中...</option>
+          </select>
+        </div>
+        <div class="voice-ref-text" id="voiceRefText"></div>
+      </div>
+
+      <div class="form-group">
+        <label>合成文本</label>
+        <textarea id="presetText" placeholder="请输入要合成的文本..." rows="4"></textarea>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-primary" id="presetSynthBtn" onclick="synthesizePreset()">
+          🎵 合成
+        </button>
+      </div>
+
+      <div id="presetPlayer"></div>
+    </div>
+
+    <!-- 右栏：声音克隆合成 -->
+    <div class="card">
+      <div class="card-title"><span class="icon">🔮</span> 声音克隆合成</div>
+
+      <div class="form-group">
+        <label>上传参考音频</label>
+        <div class="file-upload" id="fileUploadArea" onclick="document.getElementById('audioFileInput').click()">
+          <div class="upload-icon">📁</div>
+          <div class="upload-text" id="uploadText">点击或拖拽上传 wav/mp3/ogg</div>
+          <input type="file" id="audioFileInput" accept=".wav,.mp3,.ogg" onchange="handleFileUpload(event)">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>参考文本</label>
+        <textarea id="cloneRefText" placeholder="参考音频对应的文字内容..." rows="2"></textarea>
+      </div>
+
+      <div class="form-group">
+        <label>合成文本</label>
+        <textarea id="cloneText" placeholder="请输入要合成的文本..." rows="3"></textarea>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-primary" id="cloneSynthBtn" onclick="synthesizeClone()">
+          🎵 合成
+        </button>
+        <button class="btn btn-add" id="addVoiceBtn" onclick="showAddVoiceModal()" disabled>
+          📌 添加到预制
+        </button>
+      </div>
+
+      <div id="clonePlayer"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast 容器 -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- 添加预制音色模态框 -->
+<div class="modal-overlay" id="addVoiceModal" style="display:none" onclick="closeModalOutside(event)">
+  <div class="modal">
+    <h3>添加为预制音色</h3>
+    <div class="form-group">
+      <label>音色名称</label>
+      <input type="text" id="newVoiceName" placeholder="给音色起个名字...">
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:16px;">
+      参考音频和参考文本将自动保存到服务端配置。
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeAddVoiceModal()">取消</button>
+      <button class="btn btn-primary" id="confirmAddBtn" onclick="confirmAddVoice()">确认添加</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

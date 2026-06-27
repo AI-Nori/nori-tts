@@ -13,3 +13,5 @@ examples/
 server.log
 .env
 voices.yaml
+tmp/
+test_ui.log

@@ -39,8 +39,9 @@ import time
 
 import numpy as np
 import yaml
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi.responses import JSONResponse, Response, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 import scipy.signal as signal
@@ -68,6 +69,9 @@ logger = logging.getLogger("nori_tts")
 tts_engine: Optional[TTSEngine] = None
 voices_config: dict = {}  # 从 voices.yaml 加载的预设音色配置
 temp_dir = tempfile.mkdtemp(prefix="nori_tts_ref_")
+ui_enabled: bool = False  # 是否启用 WebUI
+ui_tmp_dir: str = ""  # WebUI 合成音频保存目录
+voices_config_path: str = ""  # voices.yaml 路径（用于运行时写入）
 
 app = FastAPI(
     title="nori-tts 流式合成服务",
@@ -105,6 +109,21 @@ class SpeechRequest(BaseModel):
     noise_scale: float = 0.5
     stream_chunk: int = 25
     overlap_len: int = 5
+
+
+class UISynthesizeRequest(BaseModel):
+    """WebUI 合成请求"""
+    voice: str = ""  # 预制音色名
+    ref_audio: str = ""  # base64 编码的参考音频（克隆模式）
+    ref_text: str = ""  # 参考文本（克隆模式）
+    text: str = ""  # 待合成文本
+
+
+class UIAddVoiceRequest(BaseModel):
+    """WebUI 添加预制音色请求"""
+    voice_name: str
+    ref_audio: str  # base64 编码的参考音频
+    ref_text: str  # 参考文本
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +773,245 @@ async def list_voices():
     }
 
 
+# ---------------------------------------------------------------------------
+# WebUI API 路由（--ui 启用时可用）
+# ---------------------------------------------------------------------------
+@app.get("/ui/api/voices")
+async def ui_list_voices():
+    """WebUI: 获取预制音色列表（含参考文本）"""
+    voices = voices_config.get("voices", {})
+    return {
+        "voices": [
+            {
+                "voice_id": name,
+                "ref_text": cfg.get("ref_text", ""),
+            }
+            for name, cfg in voices.items()
+        ]
+    }
+
+
+@app.post("/ui/api/synthesize")
+async def ui_synthesize(request: UISynthesizeRequest):
+    """WebUI: 离线合成音频，保存到 tmp/ 目录并返回"""
+    if tts_engine is None:
+        return JSONResponse(status_code=503, content={"error": "TTS 引擎未加载"})
+    if not ui_enabled:
+        return JSONResponse(status_code=404, content={"error": "WebUI 未启用"})
+    if not request.text or not request.text.strip():
+        return JSONResponse(status_code=400, content={"error": "合成文本不能为空"})
+
+    # 克隆模式前置校验
+    if request.ref_audio and not request.voice:
+        if not request.ref_text or not request.ref_text.strip():
+            return JSONResponse(status_code=400, content={"error": "克隆模式需提供参考文本"})
+        # 校验参考音频是否为合法音频文件
+        try:
+            import soundfile as sf
+            if request.ref_audio.startswith("data:"):
+                _, payload = request.ref_audio.split(",", 1)
+            else:
+                payload = request.ref_audio
+            raw = base64.b64decode(payload)
+            if len(raw) < 44:
+                return JSONResponse(status_code=400, content={"error": "参考音频文件过小，可能不是有效的音频文件"})
+            # 写入临时文件后用 soundfile 校验
+            _tmp_check = os.path.join(temp_dir, f"check_{uuid.uuid4().hex}.wav")
+            with open(_tmp_check, "wb") as f:
+                f.write(raw)
+            info = sf.info(_tmp_check)
+            if info.duration < 0.1:
+                return JSONResponse(status_code=400, content={"error": "参考音频时长过短（至少0.1秒）"})
+            if info.frames < 1:
+                return JSONResponse(status_code=400, content={"error": "参考音频无效，无有效帧数据"})
+            # 清理临时校验文件
+            try:
+                os.remove(_tmp_check)
+            except Exception:
+                pass
+        except Exception as e:
+            # 清理可能残留的临时文件
+            for _f in [_tmp_check] if '_tmp_check' in dir() else []:
+                try: os.remove(_f)
+                except: pass
+            err_msg = str(e)
+            if "Invalid" in err_msg or "Not a valid" in err_msg or "unrecognized" in err_msg.lower() or "not recognised" in err_msg.lower() or "Format not recognised" in err_msg:
+                return JSONResponse(status_code=400, content={"error": "参考音频格式无效，请上传合法的音频文件（wav/mp3/ogg）"})
+            return JSONResponse(status_code=400, content={"error": "参考音频校验失败，请确认文件有效"})
+    elif not request.voice and not request.ref_audio:
+        return JSONResponse(status_code=400, content={"error": "请选择预制音色或上传参考音频"})
+
+    try:
+        # 构造内部 SpeechRequest 复用现有推理逻辑
+        inner = SpeechRequest(
+            input=request.text,
+            voice=request.voice,
+            ref_audio=request.ref_audio or None,
+            ref_text=request.ref_text or None,
+            response_format="wav",
+            stream=False,
+        )
+        spk_audio_path, prompt_audio_path, ref_text, temp_ref_file = _resolve_http_voice(inner)
+
+        # 推理
+        audio_chunks = []
+        async for audio_data, samplerate in tts_engine.infer_stream_async(
+            spk_audio_path=spk_audio_path,
+            prompt_audio_path=prompt_audio_path,
+            prompt_audio_text=ref_text,
+            text=request.text,
+            is_cut_text=True,
+            stream_mode="sentence",
+            stream_chunk=25,
+            overlap_len=5,
+            boost_first_chunk=True,
+        ):
+            resampled = resample_audio(audio_data, samplerate, TARGET_SAMPLE_RATE)
+            audio_chunks.append(resampled)
+
+        # 清理临时参考音频
+        if temp_ref_file and os.path.exists(temp_ref_file):
+            try:
+                os.remove(temp_ref_file)
+            except Exception:
+                pass
+
+        if not audio_chunks:
+            return JSONResponse(status_code=500, content={"error": "合成结果为空"})
+
+        full_audio = np.concatenate(audio_chunks)
+        pcm_bytes = float32_to_pcm16(full_audio)
+        wav_bytes = make_wav_bytes(pcm_bytes, TARGET_SAMPLE_RATE)
+
+        # 保存到 tmp/ 目录
+        os.makedirs(ui_tmp_dir, exist_ok=True)
+        filename = f"tts_{uuid.uuid4().hex[:8]}.wav"
+        filepath = os.path.join(ui_tmp_dir, filename)
+        with open(filepath, "wb") as f:
+            f.write(wav_bytes)
+        logger.info(f"WebUI 合成音频已保存: {filepath} ({len(wav_bytes)} bytes)")
+
+        return Response(content=wav_bytes, media_type="audio/wav",
+                        headers={"X-Audio-Filename": filename})
+
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        logger.error(f"WebUI 合成失败: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"合成失败: {str(e)}"})
+
+
+@app.get("/ui/api/audio/{filename}")
+async def ui_get_audio(filename: str):
+    """WebUI: 获取已合成的音频文件"""
+    if not ui_enabled:
+        return JSONResponse(status_code=404, content={"error": "WebUI 未启用"})
+    # 安全检查：只允许文件名，不允许路径遍历
+    safe_name = os.path.basename(filename)
+    filepath = os.path.join(ui_tmp_dir, safe_name)
+    if not os.path.exists(filepath):
+        return JSONResponse(status_code=404, content={"error": "音频文件不存在"})
+    return FileResponse(filepath, media_type="audio/wav", filename=safe_name)
+
+
+@app.post("/ui/api/voices/add")
+async def ui_add_voice(request: UIAddVoiceRequest):
+    """WebUI: 添加预制音色（保存参考音频到 examples/，写入 voices.yaml）"""
+    global voices_config
+    if not ui_enabled:
+        return JSONResponse(status_code=404, content={"error": "WebUI 未启用"})
+    if not request.voice_name or not request.voice_name.strip():
+        return JSONResponse(status_code=400, content={"error": "音色名称不能为空"})
+    if not request.ref_audio:
+        return JSONResponse(status_code=400, content={"error": "参考音频不能为空"})
+    if not request.ref_text or not request.ref_text.strip():
+        return JSONResponse(status_code=400, content={"error": "参考文本不能为空"})
+
+    voice_name = request.voice_name.strip()
+
+    # 检查是否已存在
+    existing = voices_config.get("voices", {})
+    if voice_name in existing:
+        return JSONResponse(status_code=400, content={"error": f"音色 '{voice_name}' 已存在"})
+
+    try:
+        # 解码 base64 音频
+        if request.ref_audio.startswith("data:"):
+            _, payload = request.ref_audio.split(",", 1)
+        else:
+            payload = request.ref_audio
+        raw = base64.b64decode(payload)
+
+        # 校验音频合法性
+        import soundfile as sf
+        if len(raw) < 44:
+            return JSONResponse(status_code=400, content={"error": "音频文件过小，可能不是有效的音频文件"})
+        _tmp_check = os.path.join(temp_dir, f"check_{uuid.uuid4().hex}.wav")
+        with open(_tmp_check, "wb") as f:
+            f.write(raw)
+        try:
+            info = sf.info(_tmp_check)
+            if info.duration < 0.1:
+                return JSONResponse(status_code=400, content={"error": "参考音频时长过短（至少0.1秒）"})
+        except Exception as e:
+            try: os.remove(_tmp_check)
+            except: pass
+            err_msg = str(e)
+            if "Invalid" in err_msg or "Not a valid" in err_msg or "unrecognized" in err_msg.lower() or "not recognised" in err_msg.lower() or "Format not recognised" in err_msg:
+                return JSONResponse(status_code=400, content={"error": "音频格式无效，请上传合法的音频文件"})
+            return JSONResponse(status_code=400, content={"error": "音频校验失败，请确认文件有效"})
+        finally:
+            try: os.remove(_tmp_check)
+            except: pass
+
+        # 保存到 examples/ 目录
+        examples_dir = os.path.join(os.path.dirname(voices_config_path) or ".", "examples")
+        os.makedirs(examples_dir, exist_ok=True)
+        audio_filename = f"{voice_name}.wav"
+        audio_path = os.path.join(examples_dir, audio_filename)
+        with open(audio_path, "wb") as f:
+            f.write(raw)
+        logger.info(f"参考音频已保存: {audio_path} ({len(raw)} bytes)")
+
+        # 更新 voices_config 并写入 YAML
+        rel_audio_path = f"./examples/{audio_filename}"
+        if "voices" not in voices_config:
+            voices_config["voices"] = {}
+        voices_config["voices"][voice_name] = {
+            "ref_audio_path": rel_audio_path,
+            "ref_text": request.ref_text.strip(),
+        }
+
+        # 写回 YAML 文件
+        with open(voices_config_path, "w", encoding="utf-8") as f:
+            yaml.dump(voices_config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        logger.info(f"已添加预制音色 '{voice_name}' 到 {voices_config_path}")
+
+        # 预热新音色的参考音频缓存
+        if tts_engine is not None:
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda p=audio_path, t=request.ref_text.strip(): tts_engine.cache_prompt_audio(
+                        prompt_audio_paths=p, prompt_audio_texts=t
+                    ),
+                )
+                await loop.run_in_executor(
+                    None,
+                    lambda p=audio_path: tts_engine.cache_spk_audio(p),
+                )
+                logger.info(f"新音色 '{voice_name}' 预热完成")
+            except Exception as e:
+                logger.warning(f"新音色 '{voice_name}' 预热失败（运行时会延迟首次推理）: {e}")
+
+        return {"ok": True, "voice_id": voice_name}
+
+    except Exception as e:
+        logger.error(f"添加预制音色失败: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": f"添加失败: {str(e)}"})
+
+
 @app.websocket("/v1/audio/speech/stream")
 async def ws_tts_stream(websocket: WebSocket):
     """
@@ -868,6 +1126,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--host", type=str, default="0.0.0.0", help="服务监听地址"
     )
+    parser.add_argument(
+        "--ui", action="store_true", default=False,
+        help="启用 WebUI 管理界面（访问 http://ip:port/ui/）"
+    )
     args = parser.parse_args()
 
     voices_config = load_voices_config(args.voices_config)
@@ -878,5 +1140,20 @@ if __name__ == "__main__":
         models_dir = voices_config["models_dir"]
     else:
         models_dir = "models"
+
+    # --ui 模式：设置全局变量，挂载静态文件
+    if args.ui:
+        ui_enabled = True
+        voices_config_path = args.voices_config
+        ui_tmp_dir = str(Path(__file__).parent / "tmp")
+        os.makedirs(ui_tmp_dir, exist_ok=True)
+
+        # 挂载 WebUI 静态文件
+        ui_static_dir = str(Path(__file__).parent / "ui")
+        if os.path.isdir(ui_static_dir):
+            app.mount("/ui", StaticFiles(directory=ui_static_dir, html=True), name="ui")
+            logger.info(f"WebUI 已启用: http://{args.host}:{args.port}/ui/")
+        else:
+            logger.warning(f"WebUI 静态文件目录不存在: {ui_static_dir}，WebUI 不可用")
 
     uvicorn.run(app, host=args.host, port=args.port)
