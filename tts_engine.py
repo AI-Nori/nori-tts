@@ -396,7 +396,8 @@ class TTSEngine:
         self.gpt_models: dict[str, Gpt] = {}
         self.sovits_models: dict[str, Sovits] = {}
 
-        # 音频缓存
+        # 音频缓存（带LRU淘汰机制，防止内存泄漏）
+        self.max_cache_size = 50  # 缓存上限
         self.spk_audio_cache = {}
         self.prompt_audio_cache = {}
 
@@ -425,6 +426,10 @@ class TTSEngine:
         # 推理锁（保证同一时刻只有一个推理线程）
         self._infer_lock = threading.Lock()
 
+        # 缓存访问顺序记录（用于LRU淘汰）
+        self._spk_cache_access_order = []
+        self._prompt_cache_access_order = []
+
         logger.info(f"Device: {self.tts_config.device}, dtype: {self.tts_config.dtype}")
 
     # ---- 模型加载 ----
@@ -447,7 +452,7 @@ class TTSEngine:
 
     @torch.inference_mode()
     def cache_spk_audio(self, *spk_audio_paths: str, sovits_model: str = None):
-        """缓存说话人音频的 speaker embedding"""
+        """缓存说话人音频的 speaker embedding（带LRU淘汰，防止内存泄漏）"""
         try:
             if not self.sovits_models:
                 logger.error('No SoVITS models loaded! Cannot cache speaker audio.')
@@ -467,6 +472,8 @@ class TTSEngine:
             for spk_audio_path in spk_audio_paths:
                 refers, audio_tensor = self._get_spec(model.hps, spk_audio_path)
                 if spk_audio_path not in self.spk_audio_cache:
+                    # LRU淘汰：超过上限时删除最久未访问的条目
+                    self._evict_cache(self.spk_audio_cache, self._spk_cache_access_order)
                     sv_emb = self.sv_model.compute_embedding3(audio_tensor)
                     ge = model.vq_model.get_ge(refers, sv_emb)
                     self.spk_audio_cache[spk_audio_path] = {
@@ -476,6 +483,8 @@ class TTSEngine:
                 elif sovits_model not in self.spk_audio_cache[spk_audio_path]["ge"]:
                     ge = model.vq_model.get_ge(refers, self.spk_audio_cache[spk_audio_path]["sv_emb"])
                     self.spk_audio_cache[spk_audio_path]["ge"][sovits_model] = ge
+                # 更新访问顺序
+                self._touch_cache_key(self._spk_cache_access_order, spk_audio_path)
                 logger.info(f'Cached speaker audio: {spk_audio_path}')
 
             if not self.always_load_sv:
@@ -485,7 +494,7 @@ class TTSEngine:
 
     @torch.inference_mode()
     def cache_prompt_audio(self, prompt_audio_paths: str | list[str], prompt_audio_texts: str | list[str]):
-        """缓存提示音频的 BERT/phoneme/prompt 特征"""
+        """缓存提示音频的 BERT/phoneme/prompt 特征（带LRU淘汰，防止内存泄漏）"""
         try:
             if not self.sovits_models:
                 logger.error('No SoVITS models loaded! Cannot cache prompt audio.')
@@ -507,6 +516,8 @@ class TTSEngine:
                         "Prompt audio text is empty. "
                         "Please provide the text transcription for the reference audio."
                     )
+                # LRU淘汰：超过上限时删除最久未访问的条目
+                self._evict_cache(self.prompt_audio_cache, self._prompt_cache_access_order)
                 prompt = self._get_prompt(self.cnhubert_model, model, prompt_audio_path)
                 phones1, _, bert1, _ = get_phones_and_bert(prompt_audio_text, self.tts_config)
                 self.prompt_audio_cache[prompt_audio_path] = {
@@ -514,6 +525,8 @@ class TTSEngine:
                     "phones1": phones1,
                     "bert1": bert1,
                 }
+                # 更新访问顺序
+                self._touch_cache_key(self._prompt_cache_access_order, prompt_audio_path)
                 logger.info(f'Cached prompt audio: {prompt_audio_path}')
 
             if not self.always_load_cnhubert:
@@ -751,6 +764,9 @@ class TTSEngine:
             self.load_gpt_model(gpt_model)
         if prompt_audio_path not in self.prompt_audio_cache:
             self.cache_prompt_audio(prompt_audio_paths=prompt_audio_path, prompt_audio_texts=prompt_audio_text)
+        else:
+            # 缓存命中，更新LRU访问顺序
+            self._touch_cache_key(self._prompt_cache_access_order, prompt_audio_path)
         prompt = self.prompt_audio_cache[prompt_audio_path]["prompt"]
         phones1 = self.prompt_audio_cache[prompt_audio_path]["phones1"]
         bert1 = self.prompt_audio_cache[prompt_audio_path]["bert1"]
@@ -766,6 +782,9 @@ class TTSEngine:
             for audio_path, weight in spk_audio_path.items():
                 if (audio_path not in self.spk_audio_cache) or (sovits_model not in self.spk_audio_cache[audio_path]["ge"]):
                     self.cache_spk_audio(audio_path, sovits_model=sovits_model)
+                else:
+                    # 缓存命中，更新LRU访问顺序
+                    self._touch_cache_key(self._spk_cache_access_order, audio_path)
                 if ge is None:
                     ge = self.spk_audio_cache[audio_path]["ge"][sovits_model] * (weight / weight_sum)
                 else:
@@ -773,6 +792,9 @@ class TTSEngine:
         else:
             if (spk_audio_path not in self.spk_audio_cache) or (sovits_model not in self.spk_audio_cache[spk_audio_path]["ge"]):
                 self.cache_spk_audio(spk_audio_path, sovits_model=sovits_model)
+            else:
+                # 缓存命中，更新LRU访问顺序
+                self._touch_cache_key(self._spk_cache_access_order, spk_audio_path)
             ge = self.spk_audio_cache[spk_audio_path]["ge"][sovits_model]
         sovits = self.sovits_models[sovits_model]
         return sovits, ge
@@ -888,7 +910,24 @@ class TTSEngine:
             audio_data = np.concatenate(frames, axis=1)
             return torch.from_numpy(audio_data), stream.rate
 
+    def _touch_cache_key(self, access_order: list, key: str):
+        """更新缓存访问顺序（LRU），将key移到末尾表示最近访问"""
+        try:
+            access_order.remove(key)
+        except ValueError:
+            pass
+        access_order.append(key)
+
+    def _evict_cache(self, cache_dict: dict, access_order: list):
+        """LRU淘汰：当缓存超过上限时，删除最久未访问的条目"""
+        while len(cache_dict) >= self.max_cache_size and access_order:
+            oldest_key = access_order.pop(0)
+            if oldest_key in cache_dict:
+                del cache_dict[oldest_key]
+                logger.info(f'LRU evicted cache entry: {oldest_key}')
+
     def _empty_cache(self):
+        """清理GPU显存碎片（保留模型和音频缓存以保证性能）"""
         try:
             gc.collect()
             if self.tts_config.device.type == "cuda":

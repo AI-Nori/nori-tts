@@ -379,7 +379,10 @@ voices:
 
 ## 致谢
 
-本项目基于 https://github.com/chinokikiss/GSV-TTS-Lite 二次开发
+感谢以下项目：
+
+- [chinokikiss/GSV-TTS-Lite](https://github.com/chinokikiss/GSV-TTS-Lite)
+- [RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)
 
 ## License
 
