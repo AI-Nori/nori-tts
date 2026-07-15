@@ -549,12 +549,18 @@ class WSSession:
                 pcm_bytes = float32_to_pcm16(resampled)
                 await self.ws.send_bytes(pcm_bytes)
 
+        except WebSocketDisconnect:
+            # 客户端在流式合成中途断开，不再 send，向上抛出由 handle 统一处理
+            raise
         except Exception as e:
             logger.error(f"流式推理失败: {e}", exc_info=True)
-            await self.ws.send_json({
-                "type": "error",
-                "message": f"推理失败: {str(e)}",
-            })
+            try:
+                await self.ws.send_json({
+                    "type": "error",
+                    "message": f"推理失败: {str(e)}",
+                })
+            except WebSocketDisconnect:
+                pass  # 发送错误消息时客户端已断开，忽略
             return
 
         # 发送 audio.done
